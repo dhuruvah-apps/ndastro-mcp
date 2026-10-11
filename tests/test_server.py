@@ -1,9 +1,9 @@
 import asyncio
 
 import pytest
-from ndastro_engine.enums import Planets
+from ndastro_engine.enums import Nakshatras, Planets, Rasis
 
-from ndastro_mcp import server
+from ndastro_mcp import server, tamil
 
 _LAT = 13.0827
 _LON = 80.2707
@@ -74,3 +74,34 @@ def test_retrograde_rejects_unsupported_planet():
 def test_scan_range_is_bounded():
     with pytest.raises(ValueError, match="must not exceed"):
         server.get_combustion_periods("mercury", "2000-01-01", "2030-01-01", _LAT, _LON)
+
+
+def test_tamil_names_cover_every_engine_value():
+    assert set(tamil.PLANETS) == {p for p in Planets if p is not Planets.EMPTY}
+    assert set(tamil.RASIS) == set(Rasis)
+    assert set(tamil.NAKSHATRAS) == set(Nakshatras)
+    assert set(tamil.DASA_LEVELS) == {"maha", "antara", "pratyantara", "sookshma"}
+
+
+@pytest.mark.parametrize(("value", "expected"), [("சனி", Planets.SATURN), ("குரு", Planets.JUPITER), ("சுக்கிரன்", Planets.VENUS)])
+def test_planet_accepts_tamil_names(value: str, expected: Planets):
+    assert server._planet(value) is expected
+
+
+def test_planet_positions_add_tamil_fields_only_when_requested():
+    english = server.get_planet_positions("2000-01-01T12:00:00Z", _LAT, _LON, planets=["சூரியன்"])
+    tamil_rows = server.get_planet_positions("2000-01-01T12:00:00Z", _LAT, _LON, planets=["சூரியன்"], language="ta")
+
+    assert not any(key.endswith("_ta") for key in english[0])
+    assert tamil_rows[0]["planet"] == "sun"
+    assert tamil_rows[0]["planet_ta"] == "சூரியன்"
+    assert tamil_rows[0]["rasi_ta"] == tamil.RASIS[Rasis[tamil_rows[0]["rasi"].upper()]]
+    assert tamil_rows[0]["nakshatra_ta"] == tamil.NAKSHATRAS[Nakshatras[tamil_rows[0]["nakshatra"].upper()]]
+
+
+def test_current_dasa_in_tamil():
+    running = server.get_current_dasa(_BIRTH, _LAT, _LON, at_datetime="2026-01-01T00:00:00Z", language="ta")
+
+    assert running["maha"]["level_ta"] == "தசை"
+    assert running["antara"]["level_ta"] == "புக்தி"
+    assert running["maha"]["lord_ta"] == tamil.PLANETS[Planets[running["maha"]["lord"].upper()]]
