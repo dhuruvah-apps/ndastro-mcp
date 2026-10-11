@@ -1,7 +1,10 @@
 import asyncio
+from datetime import datetime, timezone
 
 import pytest
+from ndastro_engine.constants import DEGREE_PER_RASI
 from ndastro_engine.enums import Nakshatras, Planets, Rasis
+from ndastro_engine.retrograde import is_planet_in_retrograde
 
 from ndastro_mcp import server, tamil
 
@@ -28,6 +31,7 @@ def test_all_tools_are_registered():
         "check_retrograde",
         "get_combustion_periods",
         "check_combustion",
+        "get_birth_chart",
     } <= names
 
 
@@ -49,6 +53,48 @@ def test_planet_positions_include_sidereal_details():
         assert 0 <= row["sidereal_longitude"] < 360
         assert row["rasi"]
         assert row["nakshatra"]
+        assert 1 <= row["nakshatra_pada"] <= 4
+        assert 1 <= row["house"] <= 12
+
+
+def test_houses_are_whole_sign_from_lagna():
+    rows = server.get_planet_positions(_BIRTH, _LAT, _LON)
+    lagna_rasi = int(next(row for row in rows if row["planet"] == "ascendant")["sidereal_longitude"] // DEGREE_PER_RASI)
+
+    for row in rows:
+        assert row["house"] == (int(row["sidereal_longitude"] // DEGREE_PER_RASI) - lagna_rasi) % 12 + 1
+    assert next(row for row in rows if row["planet"] == "ascendant")["house"] == 1
+
+
+@pytest.mark.parametrize("moment", ["2026-08-01T00:00:00Z", "2026-02-15T00:00:00Z"])
+@pytest.mark.parametrize("planet", ["mercury", "saturn", "jupiter"])
+def test_retrograde_flag_matches_engine(planet: str, moment: str):
+    row = server.get_planet_positions(moment, _LAT, _LON, planets=[planet])[0]
+    when = datetime.fromisoformat(moment.replace("Z", "+00:00")).astimezone(timezone.utc)
+    expected, _, _ = is_planet_in_retrograde(when, server._planet(planet).astronomical_code, _LAT, _LON)
+
+    assert row["is_retrograde"] is expected
+
+
+def test_nodes_are_always_retrograde_and_luminaries_never():
+    rows = {row["planet"]: row for row in server.get_planet_positions(_BIRTH, _LAT, _LON)}
+
+    assert rows["rahu"]["is_retrograde"]
+    assert rows["kethu"]["is_retrograde"]
+    assert not rows["sun"]["is_retrograde"]
+    assert not rows["moon"]["is_retrograde"]
+
+
+def test_birth_chart_combines_lagna_grahas_and_dasa():
+    chart = server.get_birth_chart(_BIRTH, _LAT, _LON, at_datetime="2026-01-01T00:00:00Z", language="ta")
+
+    assert chart["house_system"] == "whole_sign"
+    assert chart["lagna"]["rasi_ta"]
+    assert [row["planet"] for row in chart["grahas"]] == [p.name.lower() for p in Planets if p not in (Planets.EMPTY, Planets.ASCENDANT)]
+    assert all("house" in row and "is_retrograde" in row for row in chart["grahas"])
+    assert chart["birth_details"]["janma_nakshatra"]
+    assert set(chart["current_dasa"]) == {"maha", "antara", "pratyantara", "sookshma"}
+    assert chart["current_dasa"]["maha"]["level_ta"] == "தசை"
 
 
 def test_dasa_periods_respect_levels():

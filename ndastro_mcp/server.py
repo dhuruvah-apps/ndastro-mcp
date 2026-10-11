@@ -34,7 +34,9 @@ from ndastro_mcp import tamil
 mcp = FastMCP(
     "ndastro",
     instructions=(
-        "Vedic astrology calculations from ndastro-engine. Datetimes are ISO 8601; a missing timezone means UTC. "
+        "Vedic astrology calculations from ndastro-engine. For prediction questions, call get_birth_chart first: it returns "
+        "the lagna, the nine grahas with whole-sign houses, nakshatra and pada, retrograde status, and the running dasa. "
+        "Datetimes are ISO 8601; a missing timezone means UTC. "
         "Longitudes are ecliptic degrees. Planets accept English names (e.g. 'saturn', 'ketu'), codes (e.g. 'SA', 'KE'), "
         "or Tamil names (e.g. 'சனி', 'கேது'). When the user writes in Tamil or asks for Tamil, pass language='ta' to get "
         "Tamil names in *_ta fields and reply to the user in Tamil."
@@ -43,6 +45,7 @@ mcp = FastMCP(
 
 _MAX_SCAN_DAYS = 3660
 _RETROGRADE_PLANETS = frozenset({Planets.MARS, Planets.MERCURY, Planets.JUPITER, Planets.VENUS, Planets.SATURN})
+_GRAHAS = [p for p in Planets if p not in (Planets.EMPTY, Planets.ASCENDANT)]
 _PLANET_ALIASES = {"KETU": Planets.KETHU, "LAGNA": Planets.ASCENDANT}
 
 Latitude = Annotated[float, Field(ge=-90, le=90, description="Latitude in decimal degrees")]
@@ -90,11 +93,51 @@ def _sidereal(tropical: float, ayanamsa: float, language: str = "en") -> dict[st
         "rasi": rasi.name.lower(),
         "degree_in_rasi": round(longitude % DEGREE_PER_RASI, 6),
         "nakshatra": nakshatra.name.lower(),
+        "nakshatra_pada": int((longitude % DEGREE_PER_NAKSHATRA) // (DEGREE_PER_NAKSHATRA / 4)) + 1,
     }
     if language == "ta":
         data["rasi_ta"] = tamil.RASIS[rasi]
         data["nakshatra_ta"] = tamil.NAKSHATRAS[nakshatra]
     return data
+
+
+def _is_retrograde(planet: Planets, speed_longitude: float) -> bool:
+    if planet in (Planets.RAHU, Planets.KETHU):
+        return True
+    return planet in _RETROGRADE_PLANETS and bool(speed_longitude < 0)
+
+
+def _chart(  # noqa: PLR0913
+    dt: datetime,
+    lat: float,
+    lon: float,
+    ayanamsa: AyanamsaSystem,
+    planets: list[Planets],
+    language: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Return the sidereal lagna and planet rows with whole-sign houses counted from the lagna."""
+    ayanamsa_value = get_ayanamsa(dt, ayanamsa)
+    lagna_tropical = get_ascendent_position(lat, lon, dt)
+    lagna = {"tropical_longitude": round(lagna_tropical, 6), **_sidereal(lagna_tropical, ayanamsa_value, language)}
+    lagna_rasi = int(lagna["sidereal_longitude"] // DEGREE_PER_RASI)
+    rows = []
+    for planet in planets:
+        position = get_planet_position(planet, lat, lon, dt)
+        row: dict[str, Any] = {"planet": planet.name.lower(), "code": planet.code}
+        if language == "ta":
+            row["planet_ta"] = tamil.PLANETS[planet]
+        sidereal = _sidereal(position.longitude, ayanamsa_value, language)
+        rows.append(
+            {
+                **row,
+                **sidereal,
+                "house": (int(sidereal["sidereal_longitude"] // DEGREE_PER_RASI) - lagna_rasi) % 12 + 1,
+                "is_retrograde": _is_retrograde(planet, position.speed_longitude),
+                "tropical_longitude": round(position.longitude, 6),
+                "speed_longitude_per_day": round(position.speed_longitude, 6),
+            }
+        )
+    return lagna, rows
 
 
 def _period(period: DasaPeriod, language: str = "en", *, include_children: bool = True) -> dict[str, Any]:
@@ -133,29 +176,13 @@ def get_planet_positions(  # noqa: PLR0913
     planets: list[str] | None = None,
     language: Language = "en",
 ) -> list[dict[str, Any]]:
-    """Return tropical and sidereal positions, rasi, and nakshatra of the grahas and ascendant.
+    """Return sidereal positions, rasi, nakshatra and pada, whole-sign house from the lagna, and retrograde status.
 
     Omit `planets` to get all nine grahas plus the ascendant.
     """
-    dt = _utc(datetime_iso)
     selected = [_planet(name) for name in planets] if planets else [p for p in Planets if p is not Planets.EMPTY]
-    ayanamsa_value = get_ayanamsa(dt, ayanamsa)
-    results = []
-    for planet in selected:
-        position = get_planet_position(planet, lat, lon, dt)
-        row: dict[str, Any] = {"planet": planet.name.lower(), "code": planet.code}
-        if language == "ta":
-            row["planet_ta"] = tamil.PLANETS[planet]
-        results.append(
-            {
-                **row,
-                "tropical_longitude": round(position.longitude, 6),
-                **_sidereal(position.longitude, ayanamsa_value, language),
-                "ecliptic_latitude": round(position.latitude, 6),
-                "speed_longitude_per_day": round(position.speed_longitude, 6),
-            }
-        )
-    return results
+    _, rows = _chart(_utc(datetime_iso), lat, lon, ayanamsa, selected, language)
+    return rows
 
 
 @mcp.tool()
@@ -271,6 +298,31 @@ def get_current_dasa(  # noqa: PLR0913
             ("pratyantara", running.pratyantara),
             ("sookshma", running.sookshma),
         )
+    }
+
+
+@mcp.tool()
+def get_birth_chart(  # noqa: PLR0913
+    birth_datetime: str,
+    lat: Latitude,
+    lon: Longitude,
+    at_datetime: Annotated[str | None, Field(description="Moment for the running dasa; defaults to now")] = None,
+    ayanamsa: AyanamsaSystem = "lahiri",
+    language: Language = "en",
+) -> dict[str, Any]:
+    """Return a complete natal chart for interpretation: lagna, nine grahas with houses, birth nakshatra, and running dasa.
+
+    Houses are whole-sign houses counted from the lagna rasi. Use this first for any prediction question.
+    """
+    lagna, grahas = _chart(_utc(birth_datetime), lat, lon, ayanamsa, _GRAHAS, language)
+    return {
+        "birth_datetime_utc": _iso(_utc(birth_datetime)),
+        "ayanamsa": ayanamsa,
+        "house_system": "whole_sign",
+        "lagna": lagna,
+        "grahas": grahas,
+        "birth_details": get_dasa_birth_details(birth_datetime, lat, lon, ayanamsa, language=language),
+        "current_dasa": get_current_dasa(birth_datetime, lat, lon, at_datetime, ayanamsa, language=language),
     }
 
 
