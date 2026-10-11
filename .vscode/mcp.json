@@ -1,0 +1,10 @@
+{
+  "servers": {
+    "ndastro": {
+      "type": "stdio",
+      "command": "poetry",
+      "args": ["run", "ndastro-mcp"],
+      "cwd": "${workspaceFolder}"
+    }
+  }
+}
