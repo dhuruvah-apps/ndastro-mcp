@@ -1,0 +1,41 @@
+[project]
+name = "ndastro-mcp"
+version = "0.1.0"
+description = "MCP server exposing ndastro-engine Vedic astrology calculations as tools."
+authors = [
+    {name = "Jaganathan, B", email = "jaganathan.eswaran@gmail.com"}
+]
+license = {text = "MIT"}
+requires-python = ">=3.10,<3.14"
+dependencies = [
+    "ndastro-engine (>=0.28.1,<0.29.0)",
+    "mcp (>=1.2.0,<2.0.0)",
+]
+
+[project.scripts]
+ndastro-mcp = "ndastro_mcp.server:main"
+
+[tool.poetry]
+packages = [{ include = "ndastro_mcp" }]
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^9.0.2"
+ruff = "^0.14.10"
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+line-length = 150
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = ["INP001", "COM812", "D213", "D203"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "D103", "D100", "ANN201", "SLF001", "PLR2004"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
