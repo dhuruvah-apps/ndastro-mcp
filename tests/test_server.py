@@ -3,11 +3,26 @@ import asyncio
 import pytest
 from ndastro_engine.enums import Nakshatras, Planets, Rasis
 
-from ndastro_mcp import server, tamil
+from ndastro_mcp import api, server
 
 _LAT = 13.0827
 _LON = 80.2707
 _BIRTH = "1990-06-15T10:30:00+05:30"
+_TAMIL_PLANETS = {"SU": "சூரியன்", "JU": "குரு", "SA": "சனி"}
+
+
+def _fake_glossary(language: str) -> dict[str, dict[str, str]]:
+    return {
+        "planets": {p.code: _TAMIL_PLANETS.get(p.code, f"{language}-{p.code}") for p in Planets if p is not Planets.EMPTY},
+        "rasis": {r.code: f"{language}-{r.code}" for r in Rasis},
+        "nakshatras": {n.code: f"{language}-{n.code}" for n in Nakshatras},
+        "dasa_levels": {level: f"{language}-{level}" for level in ("maha", "antara", "pratyantara", "sookshma")},
+    }
+
+
+@pytest.fixture
+def fake_glossary(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(api, "glossary", _fake_glossary)
 
 
 def test_all_tools_are_registered():
@@ -28,6 +43,13 @@ def test_all_tools_are_registered():
         "check_retrograde",
         "get_combustion_periods",
         "check_combustion",
+        "get_glossary",
+        "get_life_stages",
+        "get_event_timing",
+        "get_difficult_periods",
+        "calibrate_with_known_events",
+        "correct_birth_datetime",
+        "find_auspicious_dates",
     } <= names
 
 
@@ -76,32 +98,36 @@ def test_scan_range_is_bounded():
         server.get_combustion_periods("mercury", "2000-01-01", "2030-01-01", _LAT, _LON)
 
 
-def test_tamil_names_cover_every_engine_value():
-    assert set(tamil.PLANETS) == {p for p in Planets if p is not Planets.EMPTY}
-    assert set(tamil.RASIS) == set(Rasis)
-    assert set(tamil.NAKSHATRAS) == set(Nakshatras)
-    assert set(tamil.DASA_LEVELS) == {"maha", "antara", "pratyantara", "sookshma"}
-
-
-@pytest.mark.parametrize(("value", "expected"), [("சனி", Planets.SATURN), ("குரு", Planets.JUPITER), ("சுக்கிரன்", Planets.VENUS)])
-def test_planet_accepts_tamil_names(value: str, expected: Planets):
+@pytest.mark.usefixtures("fake_glossary")
+@pytest.mark.parametrize(("value", "expected"), [("சனி", Planets.SATURN), (" குரு ", Planets.JUPITER)])
+def test_planet_accepts_localized_names(value: str, expected: Planets):
     assert server._planet(value) is expected
 
 
-def test_planet_positions_add_tamil_fields_only_when_requested():
-    english = server.get_planet_positions("2000-01-01T12:00:00Z", _LAT, _LON, planets=["சூரியன்"])
-    tamil_rows = server.get_planet_positions("2000-01-01T12:00:00Z", _LAT, _LON, planets=["சூரியன்"], language="ta")
+def test_english_results_do_not_call_the_api(monkeypatch: pytest.MonkeyPatch):
+    def fail(_language: str) -> None:
+        pytest.fail("English results must not need ndastro-api")
 
-    assert not any(key.endswith("_ta") for key in english[0])
-    assert tamil_rows[0]["planet"] == "sun"
-    assert tamil_rows[0]["planet_ta"] == "சூரியன்"
-    assert tamil_rows[0]["rasi_ta"] == tamil.RASIS[Rasis[tamil_rows[0]["rasi"].upper()]]
-    assert tamil_rows[0]["nakshatra_ta"] == tamil.NAKSHATRAS[Nakshatras[tamil_rows[0]["nakshatra"].upper()]]
+    monkeypatch.setattr(api, "glossary", fail)
+    row = server.get_planet_positions("2000-01-01T12:00:00Z", _LAT, _LON, planets=["sun"])[0]
+
+    assert not any(key.endswith("_local") for key in row)
 
 
-def test_current_dasa_in_tamil():
+@pytest.mark.usefixtures("fake_glossary")
+def test_planet_positions_add_localized_fields():
+    row = server.get_planet_positions("2000-01-01T12:00:00Z", _LAT, _LON, planets=["சூரியன்"], language="ta")[0]
+
+    assert row["planet"] == "sun"
+    assert row["planet_local"] == "சூரியன்"
+    assert row["rasi_local"] == f"ta-{Rasis[row['rasi'].upper()].code}"
+    assert row["nakshatra_local"] == f"ta-{Nakshatras[row['nakshatra'].upper()].code}"
+
+
+@pytest.mark.usefixtures("fake_glossary")
+def test_current_dasa_adds_localized_fields():
     running = server.get_current_dasa(_BIRTH, _LAT, _LON, at_datetime="2026-01-01T00:00:00Z", language="ta")
 
-    assert running["maha"]["level_ta"] == "தசை"
-    assert running["antara"]["level_ta"] == "புக்தி"
-    assert running["maha"]["lord_ta"] == tamil.PLANETS[Planets[running["maha"]["lord"].upper()]]
+    assert running["maha"]["level_local"] == "ta-maha"
+    assert running["antara"]["level_local"] == "ta-antara"
+    assert running["maha"]["lord_local"] == _fake_glossary("ta")["planets"][Planets[running["maha"]["lord"].upper()].code]

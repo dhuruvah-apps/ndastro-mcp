@@ -29,17 +29,20 @@ from ndastro_engine.retrograde import find_retrograde_periods, is_planet_in_retr
 from ndastro_engine.utils import normalize_degree, parse_iso_datetime
 from pydantic import Field
 
-from ndastro_mcp import tamil
+from ndastro_mcp import api, api_tools
 
 mcp = FastMCP(
     "ndastro",
     instructions=(
-        "Vedic astrology calculations from ndastro-engine. Datetimes are ISO 8601; a missing timezone means UTC. "
-        "Longitudes are ecliptic degrees. Planets accept English names (e.g. 'saturn', 'ketu'), codes (e.g. 'SA', 'KE'), "
-        "or Tamil names (e.g. 'சனி', 'கேது'). When the user writes in Tamil or asks for Tamil, pass language='ta' to get "
-        "Tamil names in *_ta fields and reply to the user in Tamil."
+        "Vedic astrology from ndastro-engine and ndastro-api. Datetimes are ISO 8601; a missing timezone means UTC. "
+        "Longitudes are ecliptic degrees. Planets accept English names (e.g. 'saturn'), codes (e.g. 'SA'), or names in "
+        "Tamil, Hindi, Telugu, Kannada, or Malayalam (e.g. 'சனி'). When the user writes in one of those languages, pass "
+        "its code (e.g. language='ta') so results include localized names (*_local fields), and reply in that language. "
+        "Life stages, event timing, difficult periods, calibration, birth-time correction, and auspicious dates need "
+        "ndastro-api running. Present difficult periods as times for preparation, never as predictions of death or certain harm."
     ),
 )
+api_tools.register(mcp)
 
 _MAX_SCAN_DAYS = 3660
 _RETROGRADE_PLANETS = frozenset({Planets.MARS, Planets.MERCURY, Planets.JUPITER, Planets.VENUS, Planets.SATURN})
@@ -47,19 +50,26 @@ _PLANET_ALIASES = {"KETU": Planets.KETHU, "LAGNA": Planets.ASCENDANT}
 
 Latitude = Annotated[float, Field(ge=-90, le=90, description="Latitude in decimal degrees")]
 Longitude = Annotated[float, Field(ge=-180, le=180, description="Longitude in decimal degrees")]
-Language = Annotated[Literal["en", "ta"], Field(description="'ta' adds Tamil names in *_ta fields")]
+Language = Annotated[api.Language, Field(description="Non-English adds localized names in *_local fields (needs ndastro-api)")]
 
 
 def _planet(value: str) -> Planets:
-    tamil_planet = tamil.PLANET_INPUTS.get(value.strip())
-    if tamil_planet is not None:
-        return tamil_planet
-    key = value.strip().upper()
+    text = value.strip()
+    key = text.upper()
     planet = Planets.__members__.get(key) or _PLANET_ALIASES.get(key) or Planets.from_code(key)  # type: ignore[arg-type]
-    if planet is Planets.EMPTY:
-        msg = f"Unknown planet {value!r}. Use a name like 'saturn', a code like 'SA', or a Tamil name like 'சனி'."
-        raise ValueError(msg)
-    return planet
+    if planet is not Planets.EMPTY:
+        return planet
+    if not text.isascii():
+        for language in api.LANGUAGES[1:]:
+            code = next((code for code, name in api.glossary(language)["planets"].items() if name == text), None)
+            if code is not None:
+                return Planets.from_code(code)  # type: ignore[arg-type]
+    msg = f"Unknown planet {value!r}. Use a name like 'saturn', a code like 'SA', or a localized name like 'சனி'."
+    raise ValueError(msg)
+
+
+def _names(language: str) -> dict[str, dict[str, str]] | None:
+    return None if language == "en" else api.glossary(language)  # type: ignore[arg-type]
 
 
 def _utc(value: str) -> datetime:
@@ -81,7 +91,7 @@ def _scan_range(start: str, end: str) -> tuple[datetime, datetime]:
     return start_dt, end_dt
 
 
-def _sidereal(tropical: float, ayanamsa: float, language: str = "en") -> dict[str, Any]:
+def _sidereal(tropical: float, ayanamsa: float, names: dict[str, dict[str, str]] | None = None) -> dict[str, Any]:
     longitude = normalize_degree(tropical - ayanamsa)
     rasi = Rasis(int(longitude // DEGREE_PER_RASI) + 1)
     nakshatra = Nakshatras(int(longitude // DEGREE_PER_NAKSHATRA) + 1)
@@ -91,24 +101,24 @@ def _sidereal(tropical: float, ayanamsa: float, language: str = "en") -> dict[st
         "degree_in_rasi": round(longitude % DEGREE_PER_RASI, 6),
         "nakshatra": nakshatra.name.lower(),
     }
-    if language == "ta":
-        data["rasi_ta"] = tamil.RASIS[rasi]
-        data["nakshatra_ta"] = tamil.NAKSHATRAS[nakshatra]
+    if names:
+        data["rasi_local"] = names["rasis"][rasi.code]
+        data["nakshatra_local"] = names["nakshatras"][nakshatra.code]
     return data
 
 
-def _period(period: DasaPeriod, language: str = "en", *, include_children: bool = True) -> dict[str, Any]:
+def _period(period: DasaPeriod, names: dict[str, dict[str, str]] | None = None, *, include_children: bool = True) -> dict[str, Any]:
     data: dict[str, Any] = {
         "level": period.level_name,
         "lord": period.lord.lower(),
         "start_utc": _iso(period.start_utc),
         "end_utc": _iso(period.end_utc),
     }
-    if language == "ta":
-        data["level_ta"] = tamil.DASA_LEVELS[period.level_name]
-        data["lord_ta"] = tamil.PLANETS[Planets[period.lord]]
+    if names:
+        data["level_local"] = names["dasa_levels"][period.level_name]
+        data["lord_local"] = names["planets"][Planets[period.lord].code]
     if include_children and period.children:
-        data["children"] = [_period(child, language) for child in period.children]
+        data["children"] = [_period(child, names) for child in period.children]
     return data
 
 
@@ -140,17 +150,18 @@ def get_planet_positions(  # noqa: PLR0913
     dt = _utc(datetime_iso)
     selected = [_planet(name) for name in planets] if planets else [p for p in Planets if p is not Planets.EMPTY]
     ayanamsa_value = get_ayanamsa(dt, ayanamsa)
+    names = _names(language)
     results = []
     for planet in selected:
         position = get_planet_position(planet, lat, lon, dt)
         row: dict[str, Any] = {"planet": planet.name.lower(), "code": planet.code}
-        if language == "ta":
-            row["planet_ta"] = tamil.PLANETS[planet]
+        if names:
+            row["planet_local"] = names["planets"][planet.code]
         results.append(
             {
                 **row,
                 "tropical_longitude": round(position.longitude, 6),
-                **_sidereal(position.longitude, ayanamsa_value, language),
+                **_sidereal(position.longitude, ayanamsa_value, names),
                 "ecliptic_latitude": round(position.latitude, 6),
                 "speed_longitude_per_day": round(position.speed_longitude, 6),
             }
@@ -169,7 +180,7 @@ def get_ascendant(
     """Return the tropical and sidereal ascendant (lagna)."""
     dt = _utc(datetime_iso)
     tropical = get_ascendent_position(lat, lon, dt)
-    return {"tropical_longitude": round(tropical, 6), **_sidereal(tropical, get_ayanamsa(dt, ayanamsa), language)}
+    return {"tropical_longitude": round(tropical, 6), **_sidereal(tropical, get_ayanamsa(dt, ayanamsa), _names(language))}
 
 
 @mcp.tool()
@@ -178,9 +189,10 @@ def get_lunar_nodes(datetime_iso: str, ayanamsa: AyanamsaSystem = "lahiri", lang
     dt = _utc(datetime_iso)
     rahu, kethu = get_lunar_node_positions(dt)
     ayanamsa_value = get_ayanamsa(dt, ayanamsa)
+    names = _names(language)
     return {
-        "rahu": {"tropical_longitude": round(rahu, 6), **_sidereal(rahu, ayanamsa_value, language)},
-        "kethu": {"tropical_longitude": round(kethu, 6), **_sidereal(kethu, ayanamsa_value, language)},
+        "rahu": {"tropical_longitude": round(rahu, 6), **_sidereal(rahu, ayanamsa_value, names)},
+        "kethu": {"tropical_longitude": round(kethu, 6), **_sidereal(kethu, ayanamsa_value, names)},
     }
 
 
@@ -228,9 +240,10 @@ def get_dasa_birth_details(  # noqa: PLR0913
         "nakshatra_remaining_fraction": round(info.nakshatra_remaining_fraction, 6),
         "start_lord": info.start_lord.lower(),
     }
-    if language == "ta":
-        data["janma_nakshatra_ta"] = tamil.NAKSHATRAS[info.janma_nakshatra]
-        data["start_lord_ta"] = tamil.PLANETS[Planets[info.start_lord]]
+    names = _names(language)
+    if names:
+        data["janma_nakshatra_local"] = names["nakshatras"][info.janma_nakshatra.code]
+        data["start_lord_local"] = names["planets"][Planets[info.start_lord].code]
     return data
 
 
@@ -247,7 +260,7 @@ def get_dasa_periods(  # noqa: PLR0913
 ) -> list[dict[str, Any]]:
     """Return the nested dasa timeline from birth."""
     context = DasaContext(_utc(birth_datetime), lat, lon, ayanamsa, dasa_type)
-    return [_period(period, language) for period in get_dasa_timeline(context, DasaQuery(levels=levels, years=years))]
+    return [_period(period, _names(language)) for period in get_dasa_timeline(context, DasaQuery(levels=levels, years=years))]
 
 
 @mcp.tool()
@@ -263,8 +276,9 @@ def get_current_dasa(  # noqa: PLR0913
     """Return the running maha, antara, pratyantara, and sookshma dasa at a moment (defaults to now)."""
     query_dt = _utc(at_datetime) if at_datetime else datetime.now(timezone.utc)
     running = get_running_dasa(query_dt, DasaContext(_utc(birth_datetime), lat, lon, ayanamsa, dasa_type))
+    names = _names(language)
     return {
-        level: _period(period, language, include_children=False) if period else None
+        level: _period(period, names, include_children=False) if period else None
         for level, period in (
             ("maha", running.maha),
             ("antara", running.antara),
