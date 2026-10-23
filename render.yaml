@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: ndastro-mcp
+    runtime: python
+    plan: starter
+    buildCommand: >-
+      poetry install --only main &&
+      poetry run python -c "import ndastro_mcp.server"
+    startCommand: poetry run uvicorn ndastro_mcp.http:create_app --factory --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.1
+      - key: POETRY_VERSION
+        value: 2.4.1
+      - key: XDG_DATA_HOME
+        value: .render-data
+      - key: NDASTRO_MCP_API_KEY
+        generateValue: true

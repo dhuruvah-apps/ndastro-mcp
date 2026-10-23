@@ -12,6 +12,7 @@ dist/
 .venv/
 venv/
 .env
+.render-data/
 
 # Test, coverage, and lint caches
 .pytest_cache/
