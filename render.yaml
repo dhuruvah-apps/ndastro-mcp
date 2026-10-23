@@ -2,7 +2,7 @@ services:
   - type: web
     name: ndastro-mcp
     runtime: python
-    plan: starter
+    plan: free
     buildCommand: >-
       poetry install --only main &&
       poetry run python -c "import ndastro_mcp.server"

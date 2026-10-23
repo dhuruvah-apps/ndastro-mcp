@@ -21,8 +21,7 @@ The local stdio workflow does not require an API key.
    to GitHub.
 2. In the [Render dashboard](https://dashboard.render.com/), choose **New > Blueprint**
    and connect that repository.
-3. Review the Blueprint and deploy. It selects a **paid Starter web service** to
-   avoid free-service idle spin-down. Review current Render pricing before approving.
+3. Review the Blueprint and deploy. It selects a **Free web service**.
 4. Render generates a secret `NDASTRO_MCP_API_KEY`. Copy its value from the
    service's **Environment** settings into your MCP client's bearer header.
    Treat this value as a password; never commit it.
@@ -36,6 +35,25 @@ from the Poetry lockfile. The build imports the engine to download its ephemeris
 data into `.render-data` before startup; the initial build needs internet access
 and can take longer while this data downloads. The data is included in the build,
 so a persistent disk is not required.
+
+### Free plan limitations
+
+Render spins down Free web services after 15 minutes without inbound traffic.
+Waking the service takes about one minute, so Copilot's first connection may
+time out. Open `https://YOUR-SERVICE.onrender.com/health`, wait until it returns
+`{"status":"ok"}`, then reconnect the MCP server or retry your prompt.
+
+The service uses stateless HTTP, so clients can reconnect after a restart without
+recovering a server-side MCP session. Runtime filesystem changes are lost on
+restart or spin-down; the ephemeris data downloaded during the build remains
+part of the deployed build.
+
+Free instance hours are shared across your workspace (currently 750 hours per
+month). Build minutes and outbound bandwidth also have usage limits. Monitor
+usage and spending settings in Render; a Free compute plan does not make all
+platform usage unlimited. Free instances have limited compute resources, so
+long retrograde/combustion scans may be slow or time out.
+See [Render's Free service limitations](https://render.com/docs/free).
 
 The HTTP entry point refuses to start without an API key containing at least
 32 ASCII characters without whitespace. All HTTP paths except `GET`/`HEAD`
@@ -51,6 +69,7 @@ If you prefer not to use a Blueprint, select the Python runtime and use:
 
 | Setting | Value |
 | --- | --- |
+| Compute plan | Free |
 | Build command | `poetry install --only main && poetry run python -c "import ndastro_mcp.server"` |
 | Start command | `poetry run uvicorn ndastro_mcp.http:create_app --factory --host 0.0.0.0 --port $PORT` |
 | Health check path | `/health` |
